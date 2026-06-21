@@ -1,0 +1,7 @@
+asset,criticite,categorie_menace,probabilite,mitigation_existante
+Systeme de gestion des conteneurs,5,Ransomware,3,2
+Grues automatisees,4,Panne reseau OT/IT,2,3
+Systeme de navigation AIS,5,Brouillage GPS,2,1
+Plateforme douaniere,4,Panne fournisseur tiers,3,2
+Systeme de controle d acces portuaire,3,Vol d identifiants,3,2
+Reseau electrique SCADA,5,Panne electrique prolongee,2,3
