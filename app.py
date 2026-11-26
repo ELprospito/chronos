@@ -1,31 +1,29 @@
-"""
-Chronos — Suivi de l'érosion côtière à Lomé (Togo)
-Mesure satellite (Sentinel-2), lien avec le climat mondial et estimation financière, 2017-2026.
-"""
-
 import folium
+import pandas as pd
 import streamlit as st
 from folium.plugins import Fullscreen
 from streamlit_folium import st_folium
 
-# ---------------------------------------------------------------------------
-# Configuration de la page
-# ---------------------------------------------------------------------------
 st.set_page_config(
     page_title="Chronos | Érosion côtière à Lomé",
     page_icon="🌊",
     layout="wide",
 )
 
-# ---------------------------------------------------------------------------
-# Données (modifier ici si les résultats changent)
-# ---------------------------------------------------------------------------
-MAP_CENTER = [6.154, 1.303]
+CENTRE = [6.154, 1.303]
+
+FONDS = {
+    "Satellite": {
+        "tiles": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        "attr": "Esri, Maxar, Earthstar Geographics",
+    },
+    "Plan": {"tiles": "OpenStreetMap", "attr": None},
+}
 
 TRANSECTS = [
     {
         "id": "T1",
-        "nom": "Proche du port",
+        "nom": "proche du port",
         "lat": 6.152089,
         "lon": 1.294799,
         "taux": -3.03,
@@ -35,7 +33,7 @@ TRANSECTS = [
     },
     {
         "id": "T2",
-        "nom": "Plage ouverte",
+        "nom": "plage ouverte",
         "lat": 6.155743,
         "lon": 1.311280,
         "taux": 11.63,
@@ -45,12 +43,15 @@ TRANSECTS = [
     },
 ]
 
-CLIMAT_TAUX = 0.35  # m/an, part climatique mondiale (règle de Bruun)
+CLIMAT_TAUX = 0.35
 T1_TAUX = abs(TRANSECTS[0]["taux"])
+PART_CLIMAT = CLIMAT_TAUX / T1_TAUX * 100
 
-# ---------------------------------------------------------------------------
-# Style
-# ---------------------------------------------------------------------------
+PERTE_CENTRALE = 324
+PERTE_BASSE = 143
+PERTE_HAUTE = 527
+HORIZON_REFERENCE = 10
+
 st.markdown(
     """
     <style>
@@ -58,7 +59,6 @@ st.markdown(
 
     :root {
         --ocean: #0B3C5D;
-        --ocean-clair: #D9E8F2;
         --sable: #F6F1E7;
         --encre: #1B2A35;
         --gris: #5E6C76;
@@ -69,7 +69,7 @@ st.markdown(
 
     html, body, [class*="css"] { font-family: 'Inter', sans-serif; color: var(--encre); }
     .block-container { padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1200px; }
-    #MainMenu, footer, header [data-testid="stToolbar"] { visibility: hidden; }
+    #MainMenu, footer { visibility: hidden; }
 
     .hero { padding: 1.2rem 0 0.4rem 0; }
     .hero h1 {
@@ -82,7 +82,8 @@ st.markdown(
     .kpi {
         background: #FFFFFF; border: 1px solid #E3E8EC;
         border-left: 5px solid var(--neutre);
-        border-radius: 6px; padding: 1.1rem 1.2rem; height: 100%;
+        border-radius: 6px; padding: 1.1rem 1.2rem;
+        height: 100%; min-height: 10rem;
     }
     .kpi.recul { border-left-color: var(--recul); }
     .kpi.gain { border-left-color: var(--gain); }
@@ -92,13 +93,11 @@ st.markdown(
         font-family: 'Fraunces', serif; font-size: 2.1rem; font-weight: 700;
         color: var(--encre); line-height: 1.1;
     }
-    .kpi .note { font-size: 0.85rem; color: var(--gris); margin-top: 0.45rem; }
+    .kpi .note { font-size: 0.85rem; color: var(--gris); margin-top: 0.45rem; line-height: 1.45; }
     .kpi.recul .note { color: var(--recul); font-weight: 500; }
     .kpi.gain .note { color: var(--gain); font-weight: 500; }
 
-    h2, h3 { font-family: 'Fraunces', serif !important; color: var(--ocean) !important; }
-
-    .legende { display: flex; gap: 1.6rem; flex-wrap: wrap; font-size: 0.92rem; color: var(--gris); margin: 0.4rem 0 0.8rem 0; }
+    .legende { display: flex; gap: 1.6rem; flex-wrap: wrap; font-size: 0.92rem; color: var(--gris); margin: 0.2rem 0 0.8rem 0; }
     .legende span.pt {
         display: inline-block; width: 12px; height: 12px; border-radius: 50%;
         margin-right: 0.45rem; vertical-align: middle;
@@ -106,7 +105,7 @@ st.markdown(
 
     .lecture {
         background: var(--sable); border-radius: 6px;
-        padding: 1rem 1.3rem; font-size: 0.97rem; line-height: 1.6;
+        padding: 1.1rem 1.4rem; font-size: 0.98rem; line-height: 1.65;
     }
     .pied { color: var(--gris); font-size: 0.85rem; margin-top: 2rem; line-height: 1.6; }
 
@@ -119,9 +118,60 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ---------------------------------------------------------------------------
-# En-tête
-# ---------------------------------------------------------------------------
+
+def kpi(classe, label, valeur, note):
+    return (
+        f'<div class="kpi {classe}">'
+        f'<div class="label">{label}</div>'
+        f'<div class="valeur">{valeur}</div>'
+        f'<div class="note">{note}</div>'
+        f"</div>"
+    )
+
+
+def construire_carte(fond, focus):
+    if focus is None:
+        centre, zoom = CENTRE, 14
+    else:
+        centre, zoom = [focus["lat"], focus["lon"]], 16
+
+    config = FONDS[fond]
+    if config["attr"]:
+        carte = folium.Map(
+            location=centre, zoom_start=zoom, tiles=config["tiles"],
+            attr=config["attr"], control_scale=True,
+        )
+    else:
+        carte = folium.Map(
+            location=centre, zoom_start=zoom, tiles=config["tiles"], control_scale=True,
+        )
+
+    for t in TRANSECTS:
+        signe = "+" if t["taux"] > 0 else ""
+        ligne_perte = f"<br>Perte estimée : {t['perte']}" if t["perte"] else ""
+        popup_html = (
+            "<div style='font-family:Inter,sans-serif;font-size:13px;line-height:1.5'>"
+            f"<b>{t['id']}, {t['nom']}</b><br>"
+            f"Taux : {signe}{t['taux']:.2f} m/an<br>"
+            f"{t['detail']}{ligne_perte}</div>"
+        )
+        actif = focus is not None and focus["id"] == t["id"]
+        folium.CircleMarker(
+            location=[t["lat"], t["lon"]],
+            radius=15 if actif else 11,
+            color="white",
+            weight=3,
+            fill=True,
+            fill_color=t["couleur"],
+            fill_opacity=0.95,
+            tooltip=f"{t['id']}, {t['nom']}",
+            popup=folium.Popup(popup_html, max_width=280),
+        ).add_to(carte)
+
+    Fullscreen(position="topright").add_to(carte)
+    return carte
+
+
 st.markdown(
     """
     <div class="hero">
@@ -137,63 +187,45 @@ st.markdown(
 
 st.write("")
 
-# ---------------------------------------------------------------------------
-# Indicateurs clés
-# ---------------------------------------------------------------------------
-part_climat = CLIMAT_TAUX / T1_TAUX * 100
-
-k1, k2, k3, k4 = st.columns(4)
-
-k1.markdown(
-    f"""
-    <div class="kpi recul">
-        <div class="label">T1, proche du port</div>
-        <div class="valeur">{TRANSECTS[0]['taux']:.2f} m/an</div>
-        <div class="note">Recul du trait de côte</div>
-    </div>
-    """,
+c1, c2, c3, c4 = st.columns(4)
+c1.markdown(
+    kpi("recul", "T1, proche du port", f"{TRANSECTS[0]['taux']:.2f} m/an", "Recul du trait de côte"),
     unsafe_allow_html=True,
 )
-k2.markdown(
-    f"""
-    <div class="kpi gain">
-        <div class="label">T2, plage ouverte</div>
-        <div class="valeur">+{TRANSECTS[1]['taux']:.2f} m/an</div>
-        <div class="note">Accrétion (anomalie locale)</div>
-    </div>
-    """,
+c2.markdown(
+    kpi("gain", "T2, plage ouverte", f"+{TRANSECTS[1]['taux']:.2f} m/an", "Accrétion (anomalie locale)"),
     unsafe_allow_html=True,
 )
-k3.markdown(
-    f"""
-    <div class="kpi climat">
-        <div class="label">Part du climat mondial</div>
-        <div class="valeur">{CLIMAT_TAUX:.2f} m/an</div>
-        <div class="note">Règle de Bruun, soit environ {part_climat:.0f} % du recul de T1</div>
-    </div>
-    """,
+c3.markdown(
+    kpi("climat", "Part du climat mondial", f"{CLIMAT_TAUX:.2f} m/an",
+        f"Règle de Bruun, soit environ {PART_CLIMAT:.0f} % du recul de T1"),
     unsafe_allow_html=True,
 )
-k4.markdown(
-    """
-    <div class="kpi">
-        <div class="label">Perte estimée à T1 sur 10 ans</div>
-        <div class="valeur">324 M FCFA</div>
-        <div class="note">Intervalle : 143 à 527 M FCFA</div>
-    </div>
-    """,
+c4.markdown(
+    kpi("", "Perte estimée à T1 sur 10 ans", f"{PERTE_CENTRALE} M FCFA",
+        f"Intervalle : {PERTE_BASSE} à {PERTE_HAUTE} M FCFA"),
     unsafe_allow_html=True,
 )
 
 st.write("")
 
-# ---------------------------------------------------------------------------
-# Onglets
-# ---------------------------------------------------------------------------
-tab_carte, tab_lecture, tab_methode = st.tabs(["Carte des transects", "Lecture des résultats", "Méthode"])
+tab_carte, tab_projection, tab_lecture, tab_methode = st.tabs(
+    ["Carte des transects", "Projection", "Lecture des résultats", "Méthode"]
+)
 
-# ----- Carte ---------------------------------------------------------------
 with tab_carte:
+    f1, f2, f3 = st.columns([1, 1, 2])
+    choix = f1.selectbox(
+        "Zone affichée",
+        ["Vue d'ensemble"] + [f"{t['id']}, {t['nom']}" for t in TRANSECTS],
+    )
+    fond = f2.radio("Fond de carte", list(FONDS.keys()), horizontal=True)
+
+    focus = None
+    for t in TRANSECTS:
+        if choix.startswith(t["id"]):
+            focus = t
+
     st.markdown(
         """
         <div class="legende">
@@ -205,46 +237,50 @@ with tab_carte:
         unsafe_allow_html=True,
     )
 
-    carte = folium.Map(
-        location=MAP_CENTER,
-        zoom_start=14,
-        tiles="OpenStreetMap",
-        control_scale=True,
+    st_folium(
+        construire_carte(fond, focus),
+        use_container_width=True,
+        height=520,
+        returned_objects=[],
+        key=f"carte-{fond}-{choix}",
     )
 
-    folium.TileLayer(
-        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attr="Esri, Maxar, Earthstar Geographics",
-        name="Satellite",
-    ).add_to(carte)
+with tab_projection:
+    horizon = st.slider("Horizon de projection (années)", 1, 30, 10)
 
-    for t in TRANSECTS:
-        signe = "+" if t["taux"] > 0 else ""
-        ligne_perte = f"<br>Perte estimée : {t['perte']}" if t["perte"] else ""
-        popup_html = (
-            f"<div style='font-family:Inter,sans-serif;font-size:13px;line-height:1.5'>"
-            f"<b>{t['id']} : {t['nom']}</b><br>"
-            f"Taux : {signe}{t['taux']:.2f} m/an<br>"
-            f"{t['detail']}{ligne_perte}</div>"
-        )
-        folium.CircleMarker(
-            location=[t["lat"], t["lon"]],
-            radius=12,
-            color=t["couleur"],
-            weight=3,
-            fill=True,
-            fill_color=t["couleur"],
-            fill_opacity=0.65,
-            tooltip=f"{t['id']} : {t['nom']}",
-            popup=folium.Popup(popup_html, max_width=280),
-        ).add_to(carte)
+    recul = T1_TAUX * horizon
+    facteur = horizon / HORIZON_REFERENCE
+    centrale = PERTE_CENTRALE * facteur
+    basse = PERTE_BASSE * facteur
+    haute = PERTE_HAUTE * facteur
 
-    Fullscreen(position="topright").add_to(carte)
-    folium.LayerControl(position="topright", collapsed=True).add_to(carte)
+    p1, p2, p3 = st.columns(3)
+    p1.markdown(
+        kpi("recul", f"Recul cumulé de T1 en {horizon} ans", f"{recul:.1f} m", "Extrapolation linéaire du taux mesuré"),
+        unsafe_allow_html=True,
+    )
+    p2.markdown(
+        kpi("", f"Perte estimée en {horizon} ans", f"{centrale:,.0f} M FCFA".replace(",", " "),
+            "Valeur centrale, proportionnelle à la durée"),
+        unsafe_allow_html=True,
+    )
+    p3.markdown(
+        kpi("", "Fourchette", f"{basse:,.0f} à {haute:,.0f}".replace(",", " "), "En millions de FCFA"),
+        unsafe_allow_html=True,
+    )
 
-    st_folium(carte, use_container_width=True, height=520, returned_objects=[])
+    st.write("")
+    annees = list(range(0, horizon + 1))
+    donnees = pd.DataFrame(
+        {"Recul cumulé de T1 (m)": [T1_TAUX * a for a in annees]},
+        index=pd.Index(annees, name="Années"),
+    )
+    st.line_chart(donnees, color="#C0392B", height=320)
+    st.caption(
+        "Projection simple : le taux mesuré est supposé constant. Elle ne tient pas compte "
+        "d'éventuels ouvrages de protection ni de changements de dynamique sédimentaire."
+    )
 
-# ----- Lecture -------------------------------------------------------------
 with tab_lecture:
     st.markdown(
         f"""
@@ -259,14 +295,13 @@ with tab_lecture:
         Cette valeur est exceptionnelle et doit être vérifiée sur le terrain
         (dépôt de sédiments, remblais, effet de la marée sur l'image).
         <br><br>
-        À T1, la perte financière estimée sur dix ans atteint <b>324 M FCFA</b>,
-        avec une fourchette de 143 à 527 M FCFA selon une simulation Monte-Carlo.
+        À T1, la perte financière estimée sur dix ans atteint <b>{PERTE_CENTRALE} M FCFA</b>,
+        avec une fourchette de {PERTE_BASSE} à {PERTE_HAUTE} M FCFA selon une simulation Monte-Carlo.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-# ----- Méthode -------------------------------------------------------------
 with tab_methode:
     st.markdown(
         """
@@ -287,9 +322,6 @@ with tab_methode:
         """
     )
 
-# ---------------------------------------------------------------------------
-# Pied de page
-# ---------------------------------------------------------------------------
 st.markdown(
     """
     <div class="pied">
